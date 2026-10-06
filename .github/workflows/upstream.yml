@@ -53,7 +53,7 @@ jobs:
       if: steps.pick.outputs.skip != 'true'
       shell: pwsh
       working-directory: src
-      run: git apply --3way --whitespace=nowarn ../fork/patches/remove-guard.patch
+      run: git apply --ignore-whitespace --whitespace=nowarn ../fork/patches/remove-guard.patch
 
     - name: Verify patch result
       if: steps.pick.outputs.skip != 'true'
