@@ -1,0 +1,126 @@
+name: Build from upstream release
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to build (leave blank for the latest)"
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  UPSTREAM: Dingo-Shenanigans/ReSkate
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+    - name: Checkout fork
+      uses: actions/checkout@v4
+      with:
+        path: fork
+
+    - name: Pick upstream release
+      id: pick
+      shell: pwsh
+      run: |
+        $tag = "${{ inputs.tag }}"
+        if (-not $tag) { $tag = gh release view --repo $env:UPSTREAM --json tagName --jq .tagName }
+        $ver = $tag.TrimStart('v')
+        gh release view "v$ver" --repo ${{ github.repository }} *> $null
+        $skip = ($LASTEXITCODE -eq 0) -and -not "${{ inputs.tag }}"
+        "tag=$tag"  >> $env:GITHUB_OUTPUT
+        "ver=$ver"  >> $env:GITHUB_OUTPUT
+        "skip=$($skip.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+        Write-Host "Upstream: $tag  Already built: $skip"
+        $global:LASTEXITCODE = 0
+
+    - name: Checkout upstream source
+      if: steps.pick.outputs.skip != 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ env.UPSTREAM }}
+        ref: ${{ steps.pick.outputs.tag }}
+        path: src
+        fetch-depth: 0
+
+    - name: Remove store-copies files
+      if: steps.pick.outputs.skip != 'true'
+      shell: pwsh
+      run: |
+        Remove-Item src/Engine/Vfs/mod_store_copies.cpp, src/Engine/Vfs/mod_store_copies.h -ErrorAction Stop
+
+    - name: Apply patch
+      if: steps.pick.outputs.skip != 'true'
+      shell: pwsh
+      working-directory: src
+      run: git apply --3way --whitespace=nowarn ../fork/patches/remove-guard.patch
+
+    - name: Configure
+      if: steps.pick.outputs.skip != 'true'
+      working-directory: src
+      run: |
+        cmake --preset vs2022-x64 "-DDINGOSDK_VERSION=${{ steps.pick.outputs.ver }}" "-DDINGOSDK_RELEASE_REPO=${{ github.repository }}" "-DDINGOSDK_BACKTRACE_URL="
+
+    - name: Build
+      if: steps.pick.outputs.skip != 'true'
+      working-directory: src
+      run: cmake --build --preset release --parallel 4
+
+    - name: Stage and write launcher.json
+      if: steps.pick.outputs.skip != 'true'
+      shell: pwsh
+      run: |
+        $v = "${{ steps.pick.outputs.ver }}"
+        $rel = "src/build/vs2022-x64/Release"
+        New-Item -ItemType Directory -Force dist | Out-Null
+        foreach ($n in 'ReSkateLauncher.exe','ReSkate.dll','ReSkateServer.exe') {
+          if (-not (Test-Path "$rel/$n")) { throw "Missing $rel/$n" }
+          Copy-Item "$rel/$n" dist/
+        }
+        if (Test-Path src/LICENSE) { Copy-Item src/LICENSE dist/LICENSE.txt }
+        if (Test-Path src/licenses) { Copy-Item src/licenses dist/licenses -Recurse }
+
+        gh release download "${{ steps.pick.outputs.tag }}" --repo $env:UPSTREAM --pattern launcher.json --dir tmp
+        $m = Get-Content tmp/launcher.json -Raw | ConvertFrom-Json
+        function Sha($p) { (Get-FileHash $p -Algorithm SHA256).Hash.ToLower() }
+
+        $l = Get-Item dist/ReSkateLauncher.exe
+        $m.launcher.version = $v; $m.launcher.sha256 = Sha $l.FullName; $m.launcher.size = $l.Length
+        $d = Get-Item dist/ReSkate.dll
+        $m.runtime.version = $v;  $m.runtime.sha256  = Sha $d.FullName; $m.runtime.size  = $d.Length
+
+        $zip = "dist/ReSkateServer-$v.zip"
+        Compress-Archive -Path dist/ReSkateServer.exe -DestinationPath $zip
+        $z = Get-Item $zip
+        $m.server.version = $v
+        $m.server.url = "asset:ReSkateServer-$v.zip"
+        $m.server.sha256 = Sha $z.FullName
+        $m.server.size = $z.Length
+        $m.server.exe_sha256 = Sha "dist/ReSkateServer.exe"
+
+        $m | ConvertTo-Json -Depth 10 | Set-Content dist/launcher.json -Encoding utf8
+        Get-Content dist/launcher.json
+
+    - name: Upload artifact
+      if: steps.pick.outputs.skip != 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: reskate
+        if-no-files-found: error
+        path: dist/
+
+    - name: Publish release
+      if: steps.pick.outputs.skip != 'true'
+      shell: pwsh
+      run: |
+        $v = "${{ steps.pick.outputs.ver }}"
+        gh release create "v$v" `
+          dist/ReSkate.dll dist/ReSkateLauncher.exe dist/launcher.json "dist/ReSkateServer-$v.zip" `
+          --repo ${{ github.repository }} --title "$v" `
+          --notes "Upstream ${{ steps.pick.outputs.tag }} with patch applied."
