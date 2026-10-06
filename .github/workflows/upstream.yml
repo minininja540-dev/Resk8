@@ -49,12 +49,6 @@ jobs:
         path: src
         fetch-depth: 0
 
-    - name: Remove store-copies files
-      if: steps.pick.outputs.skip != 'true'
-      shell: pwsh
-      run: |
-        Remove-Item src/Engine/Vfs/mod_store_copies.cpp, src/Engine/Vfs/mod_store_copies.h -ErrorAction Stop
-
     - name: Apply patch
       if: steps.pick.outputs.skip != 'true'
       shell: pwsh
