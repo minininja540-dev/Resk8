@@ -55,6 +55,17 @@ jobs:
       working-directory: src
       run: git apply --3way --whitespace=nowarn ../fork/patches/remove-guard.patch
 
+    - name: Verify patch result
+      if: steps.pick.outputs.skip != 'true'
+      shell: pwsh
+      working-directory: src
+      run: |
+        git diff --stat HEAD
+        if (Select-String -Path Engine/Vfs/mod_merge.cpp -Pattern 'store_copy_problems','mod_store_copies.h' -Quiet) {
+          throw "Guard code is still present after patching"
+        }
+        Write-Host "Guard code removed."
+
     - name: Configure
       if: steps.pick.outputs.skip != 'true'
       working-directory: src
