@@ -4,26 +4,89 @@ on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Also publish as a GitHub Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  VERSION: "1.1.3"
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Configure CMake
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      run: >
+        cmake --preset vs2022-x64
+        -DDINGOSDK_VERSION=${{ env.VERSION }}
+        -DDINGOSDK_RELEASE_REPO=minininja540-dev/Resk8
+        -DDINGOSDK_BACKTRACE_URL=
 
     - name: Build project
-      run: cmake --build build --config Release
+      run: cmake --build --preset release --parallel 4
+
+    - name: Stage files
+      shell: pwsh
+      run: |
+        $rel = "build/vs2022-x64/Release"
+        New-Item -ItemType Directory -Force dist | Out-Null
+        foreach ($n in 'ReSkateLauncher.exe','ReSkate.dll','ReSkateServer.exe') {
+          if (-not (Test-Path "$rel/$n")) { throw "Missing $rel/$n" }
+          Copy-Item "$rel/$n" dist/
+        }
+
+    - name: Generate launcher.json
+      shell: pwsh
+      run: |
+        $v = "${{ env.VERSION }}"
+        function Sha($p) { (Get-FileHash $p -Algorithm SHA256).Hash.ToLower() }
+        $m = Get-Content launcher.json -Raw | ConvertFrom-Json
+
+        $l = Get-Item dist/ReSkateLauncher.exe
+        $m.launcher.version = $v
+        $m.launcher.sha256  = Sha $l.FullName
+        $m.launcher.size    = $l.Length
+
+        $d = Get-Item dist/ReSkate.dll
+        $m.runtime.version = $v
+        $m.runtime.sha256  = Sha $d.FullName
+        $m.runtime.size    = $d.Length
+
+        $zip = "dist/ReSkateServer-$v.zip"
+        Compress-Archive -Path dist/ReSkateServer.exe -DestinationPath $zip
+        $z = Get-Item $zip
+        $m.server.version    = $v
+        $m.server.url        = "asset:ReSkateServer-$v.zip"
+        $m.server.sha256     = Sha $z.FullName
+        $m.server.size       = $z.Length
+        $m.server.exe_sha256 = Sha "dist/ReSkateServer.exe"
+
+        $m | ConvertTo-Json -Depth 10 | Set-Content dist/launcher.json -Encoding utf8
+        Get-Content dist/launcher.json
 
     - name: Upload reskate artifacts
       uses: actions/upload-artifact@v4
       with:
         name: reskate
-        path: |
-          build/Release/
-          build/Launcher/Release/
-          build/bin/
+        if-no-files-found: error
+        path: dist/
+
+    - name: Publish release
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $v = "${{ env.VERSION }}"
+        gh release create "v$v" `
+          dist/ReSkate.dll dist/ReSkateLauncher.exe dist/launcher.json "dist/ReSkateServer-$v.zip" `
+          --title "$v" --target "${{ github.sha }}" --generate-notes
